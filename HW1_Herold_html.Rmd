@@ -1,0 +1,756 @@
+```{r setup, cache=FALSE, echo=FALSE, global.par=TRUE}
+library("RColorBrewer")    # brewer.pal
+library("knitr")           # opts_chunk
+
+# terminal output
+options(width = 100)
+
+# color palette
+palette(brewer.pal(6, "Set1"))
+
+# code chunk options
+opts_chunk$set(cache=TRUE, fig.align="center", comment=NA, echo=TRUE,
+               highlight=FALSE, tidy=FALSE, warning=FALSE, message=FALSE)
+```
+
+
+Text as Data - Homework 1 
+==========================
+  *Thomas Herold, NYU Department of Sociology*
+  
+  
+### Computing environment
+  
+  
+We will use the following R packages.
+
+```{r}
+library(quanteda)
+library(quantedaData)
+library(stringr)
+library(ggbiplot)
+library(dplyr)
+```
+
+To ensure consistent runs, we set the seed before performing any
+analysis.
+
+```{r}
+set.seed(2016)
+```
+
+
+## Question 1
+
+First we get the data, and find the two Obama speeches of interest (2009, 2016).
+```{r}
+data("SOTUCorpus")
+str(SOTUCorpus)
+
+speeches<-data.frame(SOTUCorpus$documents)
+names(speeches)
+length(speeches$texts)
+
+ob16 <- speeches$texts[speeches$President == "Obama" &  substr(speeches$Date,1,4) == "2016" ]
+ob09 <- speeches$texts[speeches$President == "Obama" &  substr(speeches$Date,1,4) == "2009" ]
+```
+
+
+Here is a function that calculates the ttr. Note that I decided to keep `removePunct = TRUE` for the tokenizer. If not, punctuation symbols would be counted as tokens, which does not make much sense for calculating the TTR.
+
+```{r}
+ttr <- function(data, 
+                # parameters we want to mess with
+                stem = FALSE, removeStopwords = FALSE, toLower = FALSE, 
+                # I decided to set this to true
+                removePunct = TRUE) {
+  if (toLower == TRUE) (data <- toLower(data))
+  tokens <- tokenize(data, removePunct = removePunct)
+  if (removeStopwords == TRUE) (tokens <- removeFeatures(tokens, stopwords("english")))
+  if (stem == TRUE) (tokens <- wordstem(tokens))
+  tokenz <- lengths(tokens)
+  typez <- ntype(tokens)
+  ttr <- typez / tokenz
+  return(ttr)
+}
+```
+
+Since all function parameters are set to FALSE, I can just use my ttr function w/o further specification to get a TTR after **only** removing punctuation! I'll try out different pre-processing option. We expect the following:
+
+- `stem`: TTR should be lower, since the number of token remains the same and the number of types decreases
+- `removeStopwords`: This should give us much higher TTRs since when excluding words like *and* or *or*, we only exclude one type each but *many* tokens.
+- `toLower`: We expect the TTR to get smaller for the same reason as with `stem`.
+
+```{r}
+ttr(ob09)
+ttr(ob16)
+
+# cet. par., this should give us lower TTR's
+ttr(ob09, stem = TRUE)
+ttr(ob16, stem = TRUE)
+
+# cet. par., this should give us (much) higher TTR's
+ttr(ob09, removeStopwords = TRUE)
+ttr(ob16, removeStopwords = TRUE)
+
+# cet. par., this should give lower TTR's: 
+ttr(ob09, toLower = TRUE)
+ttr(ob16, toLower = TRUE)
+```
+
+
+The following functions takes care of calculating the cosine similarity under the different scenarios. It takes in the two documents (note: no function parameter for the data), converts them to a dfm with the specified pre-processing steps, and then calculates the resulting cosine similarity.
+
+```{r}
+obCosSim <- function(# no function parameter for data! 
+                     # parameters we want to mess with:
+                     stem = FALSE, removeStopwords = FALSE, toLower = FALSE, 
+                     # other settings (again, I will remove punctuation!):
+                     removePunct = TRUE,
+                     removeNumbers = FALSE) {
+  ignoredFeatures <- NULL
+  if(removeStopwords == TRUE) (ignoredFeatures <- stopwords("english")) 
+  obama_dfm <- dfm(c(ob09, ob16), 
+                 # parameters that we are about to mess with
+                 stem = stem, toLower = toLower, ignoredFeatures = ignoredFeatures,
+                 # other settings
+                 removeNumbers = removeNumbers,
+                 removePunct = removePunct, 
+                 # set this to FALSE to keep function output clean
+                 verbose = FALSE)
+  cosSim <- as.matrix(similarity(obama_dfm, margin = "documents"))[1,2]
+  cat("Settings: stem = ", stem, ", removeStopwords = ", removeStopwords, 
+      ", toLower = ", toLower, ", removePunct = ", removePunct, 
+      ", removeNumbers = ", removeNumbers, 
+      "\nCosine Similarity: cos.sim(ob09, ob16) = ", round(cosSim,4), sep = "")
+}  
+```
+
+Now let's apply the function under the different scenarios:
+```{r}
+# cosine similarity with no other pre-processing than removePunct = TRUE
+obCosSim()
+# after stemming
+obCosSim(stem = TRUE)
+# after removing stopwords
+obCosSim(removeStopwords = TRUE)
+# after converting to lowercase
+obCosSim(toLower=TRUE)
+```
+
+
+Now let's look at the MTLD. 
+
+**Idea:** Write a function that finds 25 starting points (no overlaps!)
+-> non-random initialization: lengths(tokens) of speech, subtract an appropriate number of words, then distribute starting uniformly.
+
+We are going to set: `stem = FALSE`, `removeStopwords = FALSE`, `toLower = FALSE`, `removePunct = TRUE`
+
+```{r}
+mtld <- function(data, inits = 25) {
+  res <- list()
+  tokens <- tokenize(data, removePunct = TRUE)
+  tokenz <- lengths(tokens)
+  typez <- ntype(tokens)
+  res$ttr <- c("overall TTR", round(typez / tokenz,4))
+  positions <- round(seq(50, tokenz - 100, length.out = inits))
+  res$mat <- matrix(0, nrow=inits, ncol=4, 
+                    dimnames = list(NULL ,c("start", "end", "nwords", "flag"))) 
+  for (i in 1:length(positions)) {
+    start <- positions[i]
+    if (i>1) (if (start <= res$mat[i-1, 2]) (res$mat[i,4] <- 1))
+    j <- 2; ttr = 1
+    while (ttr >= .72) {
+      typ <- length(unique(tokens[[1]][start:(start+j)]))
+      tok <- length(tokens[[1]][start:(start+j)]) 
+      ttr <- typ / tok 
+      res$mat[i,1:3] <- c(positions[i], positions[i]+j, j)
+      j <- j + 1
+    }
+  }
+  if (sum(res$mat[,4])>0) (warning("Overlapping search regions.\nCheck flag vector returned by this function ($mat[,4])."))
+  res$mtld <- mean(res$mat[,3])
+  cat("MTLD = ", res$mtld, "\n[Check output object for more detailed results]", sep="")
+  return(res)  
+}
+```
+
+Now let's apply the function:
+```{r}
+mtld.09 <- mtld(ob09)
+mtld.16 <- mtld(ob16)
+```
+
+Note that the function prints the main result to the screen. But let's also inspect the object the function returns:
+
+```{r}
+# we could check the matrix
+mtld.16$mat
+# the overall TTR
+mtld.16$ttr
+# or print the MTLD again
+mtld.16$mtld
+```
+
+Why did I program in a warning and a flag vector? Let's imagine someone chooses too many starting points: 
+
+```{r, warning=TRUE}
+mtld.09.bad <- mtld(ob09, inits = 40)
+# we are being thrown a warning and can inspect the flag vector in $mat:
+mtld.09.bad$mat
+```
+-> The function detected the overlapping search regions!
+
+
+## Question 2
+
+Again, we read in the data.
+
+```{r}
+v1 <- "The tip of the tongue taking a trip of three steps down the palate to tap, at three, on the teeth."
+v2 <- "Kevin tripped and chipped his tooth on the way to platform number three."
+```
+
+Let's first build the vocabulary. I get rid of punctuation using stringr & make everything lowercase. Then, we manually create the tdm.
+
+```{r}
+v1_c <- tolower(str_replace_all(v1, "[[:punct:]]", "")) 
+v2_c <- tolower(str_replace_all(v2, "[[:punct:]]", ""))
+# to achieve the same in base R, we could say:
+# tolower(gsub(pattern="[[:punct:]]", v1, replacement=""))
+
+dupl <- unlist(strsplit(c(v1_c, v2_c), split = " "))
+vocab <- unique(dupl)
+
+string1 <- strsplit(v1_c, split = " ")[[1]]
+string2 <- strsplit(v2_c, split = " ")[[1]]
+
+tdm <- matrix(0, nrow = length(vocab), ncol = 2,dimnames = list(vocab,c("v1","v2")))
+for (i in 1:length(vocab)) {
+  for (j in 1:length(string1)) {
+    res <- string1[j] == vocab[i]
+    tdm[i,1] <- tdm[i,1] + res
+  }
+  for (k in 1:length(string2)) {
+    res <- string2[k] == vocab[i]
+    tdm[i,2] <- tdm[i,2] + res
+  }
+}
+```
+
+Now we have managed to represent each document as a 25-dimensional vector. Let's define the necessary functions next.
+
+```{r}
+len <- function(x) {
+  return(sqrt(sum(x^2)))
+}
+cosSim <- function(x,y) {
+  return(t(x) %*% y / (len(x)*len(y)))
+}
+angle <- function(x,y) {
+  return(acos(cosSim(x,y))*(180/pi))
+}
+euclid <- function(x,y) {
+  return(len(x-y))
+}
+manhattan <- function(x,y) {
+  return(sum(abs(x-y)))
+}
+```
+
+Let's start with cosine similarity.
+
+```{r}
+cosSim(tdm[,1], tdm[,2])
+acos(cosSim(tdm[,1], tdm[,2]))*(180/pi)
+# just for fun, let's remove stopwords and again 
+# (should be lower now!)
+ind <- rownames(tdm) %in% stopwords()  
+tdm.stop <- tdm[!ind,]  
+cosSim(tdm.stop[,1], tdm.stop[,2])
+# get the angle
+acos(cosSim(tdm.stop[,1], tdm.stop[,2]))*(180/pi)
+```
+
+Next, Euclidean distance. It turns out that this is just what our `len()` function does!
+Remember the example from class?
+
+```{r}
+yi <- c(0.00, 0.00, 1.38, 1.52, 0.00)  
+yj <- c(0.00, 2.13, 3.24, 0.01, 0.06)
+len(yi - yj)
+# vs.
+euclid(yi, yj)
+```
+
+So here:
+
+```{r}
+# Euclidean Distance
+euclid(tdm[,1],tdm[,2])
+euclid(tdm.stop[,1],tdm.stop[,2])
+
+## Manhattan Distance
+manhattan(tdm[,1], tdm[,2])
+manhattan(tdm.stop[,1], tdm.stop[,2])
+```
+
+## Question 3
+
+Set WD and read in files. Put together corpus - note that I already convert all the texts `toLower`. I also cut off the start and end bit that contains meta info by Gutenberg.
+```{r}
+setwd("C:/Users/johndoe/Desktop/Dropbox/Sozialwissenschaften/2_Master/4. Semester/Text as Data/HW1/dickens_austen")
+
+files <- dir(full.names=TRUE)
+names <- gsub("\\.txt", "", basename(files))
+
+corpus <- list()
+corpus$title <- corpus$author <- corpus$text <- vector("character", length = length(names))
+
+for (i in seq_along(names)) { 
+  corpus$author[i] <- strsplit(names[i], split = "_")[[1]][1]
+  corpus$title[i] <- strsplit(names[i], split = "_")[[1]][2]
+}
+corpus$title[11] <- "mystery"
+
+for (i in seq_along(files)) {
+  corpus$text[i] <- readChar(files[i], file.info(files[i])$size)
+}
+
+corpus$text <- toLower(corpus$text)
+
+# cut off start:
+for (i in 1:(length(corpus$text)-1)) {
+  start <- str_locate(corpus$text[i], "\n\n\n\n\n")[,2] + 1
+  corpus$text[i] <- substr(corpus$text[i], start, nchar(corpus$text[i]))
+  # check new start of doc:
+  print(substr(corpus$text[i],1,20))
+}
+# okay...
+
+# cut off ending part (last doc also!):
+for (i in 1:length(corpus$text)) {
+  end <- str_locate(corpus$text[i], "end of the project gutenberg ebook")[,1]
+  corpus$text[i] <- substr(corpus$text[i], 1, end)
+  print(substr(corpus$text[i],nchar(corpus$text[i])-50,nchar(corpus$text[i])))
+}
+# okay...
+```
+
+Now tokenize and form blocks of 1700 like Peng/Hengartner (2002).
+```{r}
+# tokenize
+for (i in 1:length(corpus$text)) {
+  corpus$token[i] <- tokenize(corpus$text[i], removePunct = TRUE)
+}
+
+# form blocks
+# (note that the ends are intentionally cut off since << 1700 words!)
+corpus$blocks <- list()
+for (i in 1:length(corpus$text)) {
+  len <- length(corpus$token[[i]])
+  sequence <- seq(1, len, 1700)
+  corpus$blocks[[i]] <- vector("character", length(sequence)-1)
+  for (j in 1:length(corpus$blocks[[i]])) {
+    corpus$blocks[[i]][j] <- paste(corpus$token[[i]][sequence[j]:sequence[j+1]], 
+                                   collapse = " ")
+  }
+}
+```
+
+Read in vector of the words they used for discrimination:
+```{r}
+# from http://www.biostat.jhsph.edu/~rpeng/RR/authorship/authordata.RData
+wordlist <- c("a", "all", "also", "an", "and", "any", "are", "as", "at",
+              "be", "been", "but", "by", "can", "do", "down", "even", "every",
+              "for", "from", "had", "has", "have", "her", "his", "if", "in",    
+              "into", "is", "it", "its", "may", "more", "must", "my", "no",
+              "not", "now", "of", "on", "one", "only", "or", "our", "should",
+              "so", "some", "such", "than", "that", "the", "their", "then", "there",
+              "things", "this", "to", "up", "upon", "was", "were", "what", "when",
+              "which", "who", "will", "with", "would", "your")
+```
+
+Make `overview` data.frame to keep track of which block belongs to which doc? Make vectors for `authors` and `titles`.
+```{r}
+overview <- data.frame(author = character(), title = character(), 
+                       nblocks = numeric(), stringsAsFactors=FALSE)
+for (i in 1:length(corpus$blocks)) {
+  overview[i,1] <- corpus$author[i]
+  overview[i,2] <- corpus$title[i]
+  overview[i,3] <- length(corpus$blocks[[i]])
+}
+row.names(overview) <- paste("Doc", 1:11, sep = "")
+overview
+
+authors <- vector("character")
+titles <- vector("character")
+for (i in 1:11) {
+  authors <- c(authors, rep(overview$author[i], overview$nblocks[i]))
+  titles <- c(titles, rep(overview$title[i], overview$nblocks[i]))
+}
+```
+
+Next, create dfm containing all blocks (keeping only the features from above). I use tf-weighting.
+```{r}
+dfm.blocks <- dfm(unlist(corpus$blocks)[authors != "mystery"],
+                  keptFeatures = wordlist)
+
+# check if dfm was created properly:
+sum(overview$nblocks[overview$author != "mystery"]) == length(dfm.blocks@Dimnames$docs) 
+```
+
+
+Now, run PCA, then predict *mystery* document.
+```{r}
+snippets_pca <- prcomp(dfm.blocks, center=TRUE, scale.=TRUE)
+
+## examine number of components
+plot(snippets_pca, type = "l")
+
+# packages for visualization--code taken from 
+# http://www.r-bloggers.com/computing-and-visualizing-pca-in-r/
+g <- ggbiplot(snippets_pca, obs.scale = 1, var.scale = 1, 
+              groups = authors[authors != "mystery"])
+g <- g + theme(legend.direction = 'horizontal', 
+              legend.position = 'top')
+g
+
+
+## predict: input the dfm (with appropriate features) of the mystery text
+dfm.mystery <- dfm(unlist(corpus$blocks[[11]]),
+                  keptFeatures = wordlist)
+
+predicted <- predict(snippets_pca, newdata = dfm.mystery)
+```
+
+Use Fisher's linear discrimination rule: choose the group that has a closer group mean  on the first 2 dimensions.
+
+```{r}
+# this is to determine the number of snippets per author, 
+# to divide up the results of pca
+d <- sum(authors == "dickens", na.rm = TRUE)
+a <- sum(authors == "austen", na.rm = TRUE)
+
+# find the mean of the first two PCs 
+austen_pc1_mean <- mean(snippets_pca$x[1:a,1])
+austen_pc2_mean <- mean(snippets_pca$x[1:a,2])
+austen_mean <- c(austen_pc1_mean, austen_pc2_mean)
+
+dickens_pc1_mean <- mean(snippets_pca$x[a+1:d,1])
+dickens_pc2_mean <- mean(snippets_pca$x[a+1:d,2])
+dickens_mean <- c(dickens_pc1_mean, dickens_pc2_mean)
+
+mystery_pc1_mean <- mean(predicted[,1])
+mystery_pc2_mean <- mean(predicted[,2])
+mystery_mean <- c(mystery_pc1_mean, mystery_pc2_mean)
+
+## now you need to find which is closer to the mystery mean
+austen_mean; dickens_mean; mystery_mean
+```
+
+Not entirely clear, but it looks like Austen would be the better bet, since PC1 (the strongest factor) clearly speaks for Austen. Let's try and use a little trick for visualization purposes (note that the estimates will be slightly biased, but its still useful to get an idea):
+
+```{r}
+dfm.blocks.all <- dfm(unlist(corpus$blocks),
+                      keptFeatures = wordlist)
+pca.all <- prcomp(dfm.blocks.all, center=TRUE, scale.=TRUE)
+
+g <- ggbiplot(pca.all, obs.scale = 1, var.scale = 1, 
+              groups = authors)
+g <- g + theme(legend.direction = 'horizontal', 
+               legend.position = 'top')
+g
+```
+
+We get the same picture as when calculating the means. However, I think it is fairly clear that we would predict *Austen* for all mystery snippets (since PC1 does a better job at separating the authors and the blue docs are clearly on the Austen side of PC1.
+
+Maybe our analsysis is suffering from outliers? Let's do a PCA per author and check for that! 
+
+```{r}
+# Austen
+dfm.blocks.austen <- dfm(unlist(corpus$blocks)[authors == "austen"],
+                      keptFeatures = wordlist)
+pca.austen <- prcomp(dfm.blocks.austen, center=TRUE, scale.=TRUE)
+g <- ggbiplot(pca.austen, obs.scale = 1, var.scale = 1,
+              groups = titles[authors == "austen"])
+g <- g + theme(legend.direction = 'horizontal', 
+               legend.position = 'top')
+g
+
+# Dickens 
+dfm.blocks.dickens <- dfm(unlist(corpus$blocks)[authors == "dickens"],
+                         keptFeatures = wordlist)
+pca.dickens <- prcomp(dfm.blocks.dickens, center=TRUE, scale.=TRUE)
+g <- ggbiplot(pca.dickens, obs.scale = 1, var.scale = 1,
+              groups = titles[authors == "dickens"])
+g <- g + theme(legend.direction = 'horizontal', 
+               legend.position = 'top')
+g
+```
+
+Dickens' *Bleak* looks a little problematic (scores very high on PC2) -> we might think about excluding some of these points...
+
+## Question 4
+
+Make one huge dfm (corpus$text is lowercase already)
+
+```{r}
+all.txt <- paste(corpus$text, collapse = " ")
+dfm.all <- dfm(all.txt, removePunct = TRUE)
+```
+
+Demonstrate Zipf's law (looks a little off to me!):
+
+```{r}
+plot(log10(1:100), log10(topfeatures(dfm.all, 100)),
+     xlab="log10(rank)", ylab="log10(frequency)", main="Top 100 Words")
+# regression to check if slope is approx -1.0
+regression <- lm(log10(topfeatures(dfm.all, 100)) ~ log10(1:100))
+abline(regression, col="red")
+confint(regression) 
+```
+
+Demonstrate Heap's law and find optimal $b$.
+
+```{r}
+##      M = kT^b
+# M = vocab size
+# T = number of tokens
+# k, b are constants
+
+ntok <- lengths(tokenize(all.txt, removePunct = TRUE))
+ntyp <- ntype(dfm.all) # 31085
+
+# prediciton by Heap's law w/ parms from lecture
+k <- 44; b <- .49
+k * (ntok)^b  # 50819.75 (a lot higher)
+
+# optimize for variable b and fixed k = 44
+(log(ntyp) - log(k))/log(ntok) # .4558
+```
+
+
+## Question 5
+
+Make a corpus for each document and use `kwic`.
+
+```{r}
+str(corpus$text[10])
+tale <- corpus$text[corpus$title=="tale"]
+pride <- corpus$text[corpus$title=="pride"]
+
+kwic(tale, "class", window = 5)
+kwic(pride, "class", window = 5)
+
+kwic(tale, "honoured", window = 5)
+kwic(pride, "honoured", window = 5)
+
+kwic(tale, "love", window = 5)
+kwic(pride, "love", window = 5)
+
+kwic(tale, "revolution", window = 5)
+kwic(pride, "revolution", window = 5)
+
+# yes!
+kwic(tale, "justice", window = 5)
+kwic(pride, "justice", window = 5)
+```
+
+## Question 6
+
+Read in the `ukManifestosCorpus`, split into sentences, make `overview` matrix and `years` vector to keep track of which sentence belongs to which document.
+
+```{r}
+data("ukManifestosCorpus")
+names(ukManifestosCorpus$documents)
+cons <- subset(ukManifestosCorpus$documents, Party == "Con")
+str(cons) # a data.frame
+str(cons$texts)
+
+cons$sentences <- tokenize(cons$text, "sentence")
+class(cons$sentences)
+str(cons$sentences)
+str(cons$sentences[1])
+
+# but which sentence belongs to which doc?
+overview <- data.frame(party = character(), year = numeric(), 
+                       nsentences = numeric(), stringsAsFactors=FALSE)
+for (i in 1:length(cons$sentences)) {
+  overview[i,1] <- cons$Party[i]
+  overview[i,2] <- cons$Year[i]
+  overview[i,3] <- length(cons$sentences[[i]])
+}
+overview
+
+
+years <- vector("numeric")
+for (i in 1:length(cons$sentences)) {
+  years <- c(years, rep(overview$year[i], overview$nsentences[i]))
+}
+# check
+length(cons$sentences) == length(unique(years))
+length(unlist(cons$sentences)) == length(years)
+```
+
+
+Create a df and clean using Kevin's functions:
+```{r}
+df <- data.frame(years, as.character(unlist(cons$sentences)), 
+                 stringsAsFactors = FALSE)
+names(df) <- c("years", "sentences")
+apply(df, 2, FUN = function(x) class(x))
+
+# apply Kevin's functions 
+df2 <- filter(df, grepl("^\\ï", df$sentences)==FALSE &grepl("^\\d", df$sentences) ==FALSE)
+df2 <- filter(df, ntoken(df$sentences)>3)
+
+# check results
+nrow(df2); nrow(df)
+head(df$sentences[!(df$sentences %in% df2$sentences)], 10)
+head(df2$sentences, 10)
+
+# overwrite
+df <- df2
+```
+
+
+Readability: 
+
+```{r}
+# mean for all sentences
+mean(readability(df$sentences, "Dale.Chall")) 
+# mean by year
+readability(texts(df$sentences, groups = as.factor(df$years)), 
+            c("Flesch", "Dale.Chall")) 
+# correlations are low because we are evaluating single sentences here!
+cor(readability(df$sentences, c("Flesch", "Dale.Chall")))
+```
+
+Bootstrapping using `boot`: 
+```{r}
+library(boot)
+bsReadabilityByGroup <- function(x, i, groups = NULL, measure = "Flesch") {
+  readability(texts(x[i], groups = groups), measure)
+}
+
+R <- 300
+groups <- as.factor(df$years)
+b <- boot(texts(df$sentences), bsReadabilityByGroup, strata = groups, R = R, groups = groups)
+# t0 is observed value
+# t is the matrix with dim(R,groups) containing the BS replicates
+colnames(b$t) <- names(b$t0)
+apply(b$t, 2, quantile, c(.025, .5, .975))
+# here are our SE's :)
+```
+
+Bootstrapping using our custom function: 
+```{r}
+# initialize
+year_FRE <- data.frame(matrix(nrow = 100, ncol = length(unique(df$years))))
+
+for(i in 1:100){
+  #sample 3000 (high value to make sure we get all the years!)
+  bootstrapped <- sample_n(df, 3000, replace=TRUE)
+  bootstrapped$read_FRE <- readability(bootstrapped$sentences, "Flesch")
+  #store results
+  year_FRE[i,]<-aggregate(bootstrapped$read_FRE, by=list(bootstrapped$year), FUN=mean)[,2]
+}
+
+#name the data frames
+colnames(year_FRE)<-names(table(df$year))
+```
+
+
+Define the standard error function, calculate standard errors and point estimates.
+
+```{r}
+std <- function(x) sd(x)/sqrt(length(x))
+
+ses <- apply(year_FRE, 2, std)
+coefs <- apply(year_FRE, 2, mean)
+```
+
+Now, get empirical (non-bootstrapped) means for comparison.
+
+```{r}
+table(df$years)
+df$read_FRE <- readability(df$sentences, "Flesch")
+coefs_obs <- aggregate(df$read_FRE, by=list(df$years), FUN=mean)[,2]
+# the following yields wrong results!
+# coefs_obs <- readability(texts(df$sentences, groups = as.factor(df$years)), "Flesch") 
+```
+
+Make plot.
+
+```{r}
+nyears <- length(unique(df$years))
+y.axis <- c(1:nyears)
+min <- min(min(coefs - 2*ses - .2), min(coefs_obs)-.5) 
+max <- max(max(coefs + 2*ses + .2), max(coefs_obs)+.5)
+var.names <- colnames(year_FRE)
+adjust <- 0
+par(mar=c(2,8,2,2))
+
+plot(coefs, y.axis, type = "p", axes = F, xlab = "", ylab = "", pch = 19, cex = .8, 
+     xlim=c(min,max),ylim = c(.5, nyears+.5),
+     main = "Bootstrapped Yearly FRE Scores for Cons. Party\n[Point Estimates, and 95/97.5% CIs]", cex.main = .6)
+
+# make color vector for rects
+pal <- c("grey97", "grey95")
+colvec <- rep(pal, length.out = nyears)
+# make rects
+minval <- -.5; maxval <- .5 
+for (i in 1:nyears) {
+  rect(min, minval + i, max, maxval + i, 
+       col = colvec[i], border="grey90", lty = 2)
+}
+axis(1, at = seq(min,max,(max-min)/10), 
+     labels = c(round(min+0*((max-min)/10),3),
+                round(min+1*((max-min)/10),3),
+                round(min+2*((max-min)/10),3),
+                round(min+3*((max-min)/10),3),
+                round(min+4*((max-min)/10),3),
+                round(min+5*((max-min)/10),3),
+                round(min+6*((max-min)/10),3),
+                round(min+7*((max-min)/10),3),
+                round(min+8*((max-min)/10),3),
+                round(min+9*((max-min)/10),3),
+                round(max,3)),tick = T,cex.axis = .75, mgp = c(2,.7,0))
+axis(2, at = y.axis, label = var.names, las = 1, tick = FALSE, cex.axis =.8)
+abline(h = y.axis, lty = 2, lwd = .5, col = "white")
+segments(coefs-qnorm(.975)*ses, y.axis+2*adjust, coefs+qnorm(.975)*ses, y.axis+2*adjust, lwd =  1)
+
+segments(coefs-qnorm(.95)*ses, y.axis+2*adjust-.035, coefs-qnorm(.95)*ses, y.axis+2*adjust+.035, lwd = .9)
+segments(coefs+qnorm(.95)*ses, y.axis+2*adjust-.035, coefs+qnorm(.95)*ses, y.axis+2*adjust+.035, lwd = .9)
+points(coefs, y.axis+2*adjust,pch=21,cex=.8, col = "black", bg="white")
+
+# plot empirical points
+points(coefs_obs, y.axis+2*adjust,pch=16, col="red", cex = .5)
+# note that we have one outlier!
+
+# make legend
+legend(43.2, 16, c("empirical means", "bootstrapped means"), pch = c(16,21), 
+            col = c("red", "black"), bg = c("white", "white"), cex = .5)
+```
+
+Check some results.
+```{r}
+## interesting: 
+fre.1979 <- readability(texts(df$sentences[df$years == 1979]), "Flesch")
+fre.1951 <- readability(texts(df$sentences[df$years == 1951]), "Flesch")
+# FRE mostly is btw. 0 and 100
+# however:
+summary(fre.1979)
+summary(fre.1951)
+df$sentences[df$years == 1979][fre.1979 == min(fre.1979)]
+readability("locally-elected politicians.", "Flesch")
+
+df$sentences[df$years == 1979][fre.1979 == max(fre.1979)]
+readability("  1989/90;", "Flesch")
+```
+
+We can see: We still have bad sentence detection -> Should use better SBD tools/maybe do a little more pre-processing.
+
+
+** END OF DOCUMENT ** 
